@@ -1,0 +1,9 @@
+[wrap-file]
+directory = lz4-1.10.0
+source_url = https://github.com/lz4/lz4/archive/refs/tags/v1.10.0.tar.gz
+source_filename = lz4-1.10.0.tar.gz
+source_hash = 5375120616969e9a600f83a90414823631e80b7e0948fc17d26e6a7d65227f07
+patch_directory = lz4_1.10.0-1_patch
+
+[provide]
+lz4 = lz4_dep

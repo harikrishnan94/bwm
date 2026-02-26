@@ -1,0 +1,7 @@
+[wrap-git]
+url = https://github.com/p-ranav/argparse.git
+revision = v3.2
+depth = 1
+
+[provide]
+argparse = argparse_dep

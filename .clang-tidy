@@ -1,0 +1,25 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Harikrishnan Prabakaran (harikrishnanprabakaran@gmail.com)
+---
+# Pragmatic defaults: focus on correctness, safety, and performance.
+# Avoid subjective formatting/style rules.
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  cppcoreguidelines-*
+  hicpp-*,
+  misc-*,
+  modernize-*,
+  performance-*,
+  readability-*,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+WarningsAsErrors: ""
+HeaderFilterRegex: "src/.*"
+FormatStyle: "file"
+CheckOptions:
+  - key: modernize-use-nullptr.NullMacros
+    value: "NULL"
+  - key: modernize-use-using.IgnoreMacros
+    value: "true"

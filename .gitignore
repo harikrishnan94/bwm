@@ -1,0 +1,13 @@
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2026 Harikrishnan Prabakaran (harikrishnanprabakaran@gmail.com)
+
+# OS
+.DS_Store
+
+# VSCode
+.cache/
+compile_commands.json
+
+# Meson
+packagecache
+.wraplock

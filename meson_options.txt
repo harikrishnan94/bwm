@@ -1,0 +1,2 @@
+option('enable_tests', type: 'boolean', value: true, description: 'Build test targets')
+option('default_queue_depth', type: 'integer', value: 1024, min: 16, description: 'Default bounded queue depth')
