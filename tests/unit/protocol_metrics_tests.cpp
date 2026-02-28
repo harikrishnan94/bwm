@@ -1,4 +1,5 @@
 #include <cmath>
+#include <format>
 #include <iostream>
 #include <vector>
 
@@ -17,19 +18,19 @@ int main() {
   auto close = [](double a, double b) { return std::fabs(a - b) < 1e-9; };
 
   if (!close(m.mean, 3.0)) {
-    std::cerr << "mean mismatch: " << m.mean << "\n";
+    std::cerr << std::format("mean mismatch: {}\n", m.mean);
     return 1;
   }
   if (!close(m.median, 3.0)) {
-    std::cerr << "median mismatch: " << m.median << "\n";
+    std::cerr << std::format("median mismatch: {}\n", m.median);
     return 1;
   }
   if (!close(m.min, 1.0) || !close(m.max, 5.0)) {
-    std::cerr << "min/max mismatch: " << m.min << "/" << m.max << "\n";
+    std::cerr << std::format("min/max mismatch: {}/{}\n", m.min, m.max);
     return 1;
   }
   if (!(m.p95 >= 4.7 && m.p95 <= 5.0)) {
-    std::cerr << "p95 out of expected range: " << m.p95 << "\n";
+    std::cerr << std::format("p95 out of expected range: {}\n", m.p95);
     return 1;
   }
 

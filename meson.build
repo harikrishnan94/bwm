@@ -11,23 +11,6 @@ project(
 
 cpp = meson.get_compiler('cpp')
 
-std_expected_ok = cpp.compiles(
-  '''
-  #include <expected>
-  std::expected<int, int> x = 1;
-  int main() {
-    return x.has_value() ? 0 : 1;
-  }
-  ''',
-  name: 'std::expected availability',
-  required: false,
-)
-if std_expected_ok
-  add_project_arguments('-DBWM_HAVE_STD_EXPECTED=1', language: 'cpp')
-else
-  add_project_arguments('-DBWM_HAVE_STD_EXPECTED=0', language: 'cpp')
-endif
-
 lz4_dep = dependency('liblz4', required: false)
 if not lz4_dep.found()
   lz4_dep = dependency('lz4', fallback: ['lz4', 'lz4_dep'], required: true)
@@ -40,10 +23,6 @@ xxhash_dep = dependency('xxhash', fallback: ['xxhash', 'xxhash_dep'], required: 
 argparse_dep = dependency('argparse', required: false)
 
 deps = [lz4_dep, zstd_dep, xxhash_dep, argparse_dep]
-if not std_expected_ok
-  tl_expected_dep = dependency('tl-expected', fallback: ['tl-expected', 'tl_expected_dep'], required: false)
-  deps += tl_expected_dep
-endif
 
 inc = include_directories('include')
 src_inc = include_directories('src')

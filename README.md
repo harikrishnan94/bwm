@@ -35,7 +35,7 @@
 ## Non-Functional Requirements
 
 - Deterministic generation for the same seed + sequence.
-- Clear error propagation using `Expected<T>` with `bwm::Error`.
+- Clear error propagation using `bwm::Error` with explicit error metadata (`code`, `message`).
 - No placeholder/stub protocol path in production benchmark flow.
 - Bounded queue behavior for scheduler implementation.
 - Direct-I/O checks and platform-specific sync behavior in disk benchmark flow.
@@ -119,7 +119,7 @@ Each metric summary reports distribution statistics (`mean`, `median`, `p95`, `m
 
 1. **Do not reintroduce smoke-only tests.** New tests must validate behavior/metrics/contracts.
 2. **Keep `engine.cpp` thin.** Orchestration belongs in dedicated modules.
-3. **Use `Expected<T>` for operational failures**; avoid hidden exception-only control paths.
+3. **Use explicit `bwm::Error` values for operational failures**; avoid hidden exception-only control paths.
 4. **Preserve deterministic behavior** for benchmark comparability.
 5. **Maintain protocol metrics compatibility** with JSON consumers.
 

@@ -1,7 +1,6 @@
 #include "bwm/codec/codec.hpp"
 
-#include <exception>
-
+#include "bwm/core/error.hpp"
 #include "app/config_types.hpp"
 #include "codec/runtime_codec.hpp"
 
@@ -40,21 +39,21 @@ class CodecAdapter final : public ICodec {
   CodecId id() const noexcept override { return id_; }
   const char* name() const noexcept override { return codec_name(id_); }
 
-  size_t max_compressed_size(size_t raw_size) const noexcept override {
+  size_t max_compressed_size(size_t raw_size) const override {
     return impl_.max_compressed_size(raw_size);
   }
 
-  Expected<size_t> compress(std::span<const std::byte> raw,
-                            std::span<std::byte> out) noexcept override {
+  size_t compress(std::span<const std::byte> raw,
+                  std::span<std::byte> out) override {
     auto raw_u8 =
         std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(raw.data()), raw.size());
     auto out_u8 = std::span<uint8_t>(reinterpret_cast<uint8_t*>(out.data()), out.size());
     return impl_.compress(raw_u8, out_u8);
   }
 
-  Expected<size_t> decompress(std::span<const std::byte> comp,
-                              std::span<std::byte> out,
-                              size_t expected_raw_size) noexcept override {
+  size_t decompress(std::span<const std::byte> comp,
+                    std::span<std::byte> out,
+                    size_t expected_raw_size) override {
     auto comp_u8 =
         std::span<const uint8_t>(reinterpret_cast<const uint8_t*>(comp.data()), comp.size());
     auto out_u8 = std::span<uint8_t>(reinterpret_cast<uint8_t*>(out.data()), out.size());
@@ -68,18 +67,12 @@ class CodecAdapter final : public ICodec {
 
 }  // namespace
 
-Expected<std::unique_ptr<ICodec>> make_codec(const CodecParams& params) noexcept {
+std::unique_ptr<ICodec> make_codec(const CodecParams& params) {
   if (params.id != CodecId::None && params.id != CodecId::Lz4 && params.id != CodecId::Zstd) {
-    return std::unexpected(Error{ErrorCode::InvalidArgument, "invalid codec id"});
+    throw Error{ErrorCode::InvalidArgument, "invalid codec id"};
   }
 
-  try {
-    return std::unique_ptr<ICodec>(new CodecAdapter(params));
-  } catch (const std::exception& ex) {
-    return std::unexpected(Error{ErrorCode::Internal, ex.what()});
-  } catch (...) {
-    return std::unexpected(Error{ErrorCode::Internal, "failed to allocate codec"});
-  }
+  return std::unique_ptr<ICodec>(new CodecAdapter(params));
 }
 
 }  // namespace bwm

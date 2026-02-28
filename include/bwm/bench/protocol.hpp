@@ -4,7 +4,6 @@
 #include <cstdint>
 #include <span>
 
-#include "bwm/core/expected.hpp"
 #include "bwm/core/types.hpp"
 
 namespace bwm {
@@ -16,10 +15,10 @@ struct TimedPhaseResult {
   uint64_t sink_hash{};
 };
 
-Expected<TimedPhaseResult> run_timed_phase(const PhaseConfig& cfg,
-                                           std::chrono::seconds duration,
-                                           std::chrono::seconds warmup) noexcept;
+TimedPhaseResult run_timed_phase(const PhaseConfig& cfg,
+                                 std::chrono::seconds duration,
+                                 std::chrono::seconds warmup);
 
-AggregateMetrics summarize_repeats(std::span<const TimedPhaseResult> repeats) noexcept;
+AggregateMetrics summarize_repeats(std::span<const TimedPhaseResult> repeats);
 
 }  // namespace bwm

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <exception>
 #include <string>
 #include <utility>
 
@@ -14,13 +15,18 @@ enum class ErrorCode {
   Internal,
 };
 
-struct Error {
-  ErrorCode code{};
-  std::string message{};
+class Error : public std::exception {
+  ErrorCode code_{ErrorCode::Internal};
+  std::string message_{};
 
+public:
   Error() = default;
-  Error(ErrorCode c, std::string m) : code(c), message(std::move(m)) {}
-  explicit Error(std::string m) : code(ErrorCode::Internal), message(std::move(m)) {}
+  Error(ErrorCode c, std::string m) : code_(c), message_(std::move(m)) {}
+  explicit Error(std::string m) : message_(std::move(m)) {}
+
+  const char *what() const noexcept override { return message_.c_str(); }
+
+  ErrorCode code() const noexcept { return code_; }
 };
 
-}  // namespace bwm
+} // namespace bwm

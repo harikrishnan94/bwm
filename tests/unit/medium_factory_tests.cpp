@@ -1,6 +1,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <format>
 #include <iostream>
 #include <string>
 #include <vector>
@@ -22,11 +23,11 @@ bool test_disk_medium_roundtrip() {
 
   auto medium = bwm::make_disk_medium(rc);
   if (!medium) {
-    std::cerr << "make_disk_medium failed\n";
+    std::cerr << std::format("make_disk_medium failed\n");
     return false;
   }
-  if ((*medium)->kind() != bwm::MediumKind::Disk) {
-    std::cerr << "disk medium kind mismatch\n";
+  if (medium->kind() != bwm::MediumKind::Disk) {
+    std::cerr << std::format("disk medium kind mismatch\n");
     return false;
   }
 
@@ -34,9 +35,11 @@ bool test_disk_medium_roundtrip() {
   wop.segment_id = 0;
   wop.truncate = true;
 
-  auto writer = (*medium)->open_writer(wop);
-  if (!writer) {
-    std::cerr << "disk open_writer failed: " << writer.error().message << "\n";
+  std::unique_ptr<bwm::IMediumWriter> writer;
+  try {
+    writer = medium->open_writer(wop);
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("disk open_writer failed: {}\n", e.what());
     return false;
   }
 
@@ -51,50 +54,43 @@ bool test_disk_medium_roundtrip() {
   hdr.checksum = 0;
   hdr.algo_id = static_cast<uint8_t>(bwm::CodecId::None);
 
-  auto append = (*writer)->append_chunk(hdr, payload);
-  if (!append) {
-    std::cerr << "append_chunk failed: " << append.error().message << "\n";
-    return false;
-  }
-  auto sync = (*writer)->sync();
-  if (!sync) {
-    std::cerr << "sync failed: " << sync.error().message << "\n";
-    return false;
-  }
-  auto close_w = (*writer)->close();
-  if (!close_w) {
-    std::cerr << "close writer failed: " << close_w.error().message << "\n";
+  try {
+    writer->append_chunk(hdr, payload);
+    writer->sync();
+    writer->close();
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("writer operation failed: {}\n", e.what());
     return false;
   }
 
   bwm::ReadOpenParams rop{};
   rop.segment_paths.push_back((out_dir / "segment_0.dat").string());
 
-  auto reader = (*medium)->open_reader(rop);
-  if (!reader) {
-    std::cerr << "disk open_reader failed: " << reader.error().message << "\n";
+  std::unique_ptr<bwm::IMediumReader> reader;
+  bwm::OwnedChunk chunk{};
+  try {
+    reader = medium->open_reader(rop);
+    chunk = reader->read_chunk_by_index(0, 0);
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("reader operation failed: {}\n", e.what());
     return false;
   }
 
-  auto chunk = (*reader)->read_chunk_by_index(0, 0);
-  if (!chunk) {
-    std::cerr << "read chunk failed: " << chunk.error().message << "\n";
-    return false;
-  }
-  if (chunk->storage.size() != payload.size()) {
-    std::cerr << "payload size mismatch\n";
+  if (chunk.storage.size() != payload.size()) {
+    std::cerr << std::format("payload size mismatch\n");
     return false;
   }
   for (size_t i = 0; i < payload.size(); ++i) {
-    if (chunk->storage[i] != payload[i]) {
-      std::cerr << "payload data mismatch at index " << i << "\n";
+    if (chunk.storage[i] != payload[i]) {
+      std::cerr << std::format("payload data mismatch at index {}\n", i);
       return false;
     }
   }
 
-  auto close_r = (*reader)->close();
-  if (!close_r) {
-    std::cerr << "close reader failed: " << close_r.error().message << "\n";
+  try {
+    reader->close();
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("close reader failed: {}\n", e.what());
     return false;
   }
 
@@ -109,36 +105,47 @@ bool test_tcp_medium_contracts() {
 
   auto sender = bwm::make_tcp_sender_medium(rc);
   if (!sender) {
-    std::cerr << "make_tcp_sender_medium failed\n";
+    std::cerr << std::format("make_tcp_sender_medium failed\n");
     return false;
   }
-  if ((*sender)->kind() != bwm::MediumKind::Tcp) {
-    std::cerr << "sender medium kind mismatch\n";
+  if (sender->kind() != bwm::MediumKind::Tcp) {
+    std::cerr << std::format("sender medium kind mismatch\n");
     return false;
   }
 
-  auto sender_reader = (*sender)->open_reader(bwm::ReadOpenParams{});
-  if (sender_reader || sender_reader.error().code != bwm::ErrorCode::Unsupported) {
-    std::cerr << "tcp sender open_reader should be unsupported\n";
+  bool sender_read_unsupported = false;
+  try {
+    static_cast<void>(sender->open_reader(bwm::ReadOpenParams{}));
+  } catch (const bwm::Error &e) {
+    sender_read_unsupported = (e.code() == bwm::ErrorCode::Unsupported);
+  }
+  if (!sender_read_unsupported) {
+    std::cerr << std::format("tcp sender open_reader should be unsupported\n");
     return false;
   }
 
   auto receiver = bwm::make_tcp_receiver_medium(rc);
   if (!receiver) {
-    std::cerr << "make_tcp_receiver_medium failed\n";
+    std::cerr << std::format("make_tcp_receiver_medium failed\n");
     return false;
   }
 
-  auto receiver_writer = (*receiver)->open_writer(bwm::WriteOpenParams{});
-  if (receiver_writer || receiver_writer.error().code != bwm::ErrorCode::Unsupported) {
-    std::cerr << "tcp receiver open_writer should be unsupported\n";
+  bool receiver_write_unsupported = false;
+  try {
+    static_cast<void>(receiver->open_writer(bwm::WriteOpenParams{}));
+  } catch (const bwm::Error &e) {
+    receiver_write_unsupported = (e.code() == bwm::ErrorCode::Unsupported);
+  }
+  if (!receiver_write_unsupported) {
+    std::cerr <<
+        std::format("tcp receiver open_writer should be unsupported\n");
     return false;
   }
 
   return true;
 }
 
-}  // namespace
+} // namespace
 
 int main() {
   if (!test_disk_medium_roundtrip()) {

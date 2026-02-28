@@ -1,5 +1,6 @@
 #include <chrono>
 #include <filesystem>
+#include <format>
 #include <iostream>
 
 #include "bwm/bench/protocol.hpp"
@@ -11,9 +12,15 @@ bool test_invalid_mode_rejected() {
   bwm::PhaseConfig cfg{};
   cfg.mode = bwm::Mode::SuiteAll;
 
-  auto r = bwm::run_timed_phase(cfg, std::chrono::seconds(1), std::chrono::seconds(0));
-  if (r || r.error().code != bwm::ErrorCode::InvalidArgument) {
-    std::cerr << "expected invalid argument for SuiteAll mode\n";
+  bool rejected = false;
+  try {
+    static_cast<void>(bwm::run_timed_phase(cfg, std::chrono::seconds(1),
+                                           std::chrono::seconds(0)));
+  } catch (const bwm::Error &e) {
+    rejected = (e.code() == bwm::ErrorCode::InvalidArgument);
+  }
+  if (!rejected) {
+    std::cerr << std::format("expected invalid argument for SuiteAll mode\n");
     return false;
   }
   return true;
@@ -23,9 +30,15 @@ bool test_invalid_duration_rejected() {
   bwm::PhaseConfig cfg{};
   cfg.mode = bwm::Mode::RawWrite;
 
-  auto r = bwm::run_timed_phase(cfg, std::chrono::seconds(0), std::chrono::seconds(0));
-  if (r || r.error().code != bwm::ErrorCode::InvalidArgument) {
-    std::cerr << "expected invalid argument for zero duration\n";
+  bool rejected = false;
+  try {
+    static_cast<void>(bwm::run_timed_phase(cfg, std::chrono::seconds(0),
+                                           std::chrono::seconds(0)));
+  } catch (const bwm::Error &e) {
+    rejected = (e.code() == bwm::ErrorCode::InvalidArgument);
+  }
+  if (!rejected) {
+    std::cerr << std::format("expected invalid argument for zero duration\n");
     return false;
   }
   return true;
@@ -46,21 +59,24 @@ bool test_disk_raw_write_metrics() {
   cfg.run.worker_threads = 1;
   cfg.run.queue_depth = 64;
 
-  auto r = bwm::run_timed_phase(cfg, std::chrono::seconds(1), std::chrono::seconds(0));
-  if (!r) {
-    std::cerr << "run_timed_phase failed: " << r.error().message << "\n";
+  bwm::TimedPhaseResult r{};
+  try {
+    r = bwm::run_timed_phase(cfg, std::chrono::seconds(1),
+                             std::chrono::seconds(0));
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("run_timed_phase failed: {}\n", e.what());
     return false;
   }
-  if (r->total_uncompressed_bytes == 0) {
-    std::cerr << "expected non-zero uncompressed bytes\n";
+  if (r.total_uncompressed_bytes == 0) {
+    std::cerr << std::format("expected non-zero uncompressed bytes\n");
     return false;
   }
-  if (r->metrics.eff_gbps <= 0.0) {
-    std::cerr << "expected positive effective throughput\n";
+  if (r.metrics.eff_gbps <= 0.0) {
+    std::cerr << std::format("expected positive effective throughput\n");
     return false;
   }
-  if (r->metrics.bytes_uncompressed != r->total_uncompressed_bytes) {
-    std::cerr << "bytes_uncompressed mismatch\n";
+  if (r.metrics.bytes_uncompressed != r.total_uncompressed_bytes) {
+    std::cerr << std::format("bytes_uncompressed mismatch\n");
     return false;
   }
 
@@ -68,7 +84,7 @@ bool test_disk_raw_write_metrics() {
   return true;
 }
 
-}  // namespace
+} // namespace
 
 int main() {
   if (!test_invalid_mode_rejected()) {

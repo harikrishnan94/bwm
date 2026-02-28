@@ -1,4 +1,5 @@
 #include <cstdint>
+#include <format>
 #include <iostream>
 #include <vector>
 
@@ -22,12 +23,14 @@ int main() {
   gen3.generate(7, c, 4096);
 
   if (a != b) {
-    std::cerr << "Determinism failed: same seed and seq produced different output\n";
+    std::cerr << std::format(
+        "Determinism failed: same seed and seq produced different output\n");
     return 1;
   }
 
   if (a == c) {
-    std::cerr << "Diversity failed: different seed produced identical output\n";
+    std::cerr << std::format(
+        "Diversity failed: different seed produced identical output\n");
     return 1;
   }
 

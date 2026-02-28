@@ -4,8 +4,6 @@
 #include <cstdint>
 #include <memory>
 
-#include "bwm/core/expected.hpp"
-
 namespace bwm {
 
 struct Job {
@@ -24,13 +22,13 @@ class IScheduler {
  public:
   virtual ~IScheduler() = default;
 
-  virtual Expected<void> start() noexcept = 0;
-  virtual Expected<void> submit(Job job) noexcept = 0;
-  virtual Expected<void> stop_issue_new_work() noexcept = 0;
-  virtual Expected<void> drain() noexcept = 0;
-  virtual Expected<void> join() noexcept = 0;
+  virtual void start() = 0;
+  virtual void submit(Job job) = 0;
+  virtual void stop_issue_new_work() = 0;
+  virtual void drain() = 0;
+  virtual void join() = 0;
 };
 
-Expected<std::unique_ptr<IScheduler>> make_scheduler(const SchedulerConfig&) noexcept;
+std::unique_ptr<IScheduler> make_scheduler(const SchedulerConfig&);
 
 }  // namespace bwm

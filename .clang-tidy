@@ -7,7 +7,7 @@ Checks: >
   -*,
   bugprone-*,
   clang-analyzer-*,
-  cppcoreguidelines-*
+  cppcoreguidelines-*,
   hicpp-*,
   misc-*,
   modernize-*,

@@ -6,7 +6,6 @@
 #include <string>
 #include <vector>
 
-#include "bwm/core/expected.hpp"
 #include "bwm/core/types.hpp"
 
 namespace bwm {
@@ -35,20 +34,20 @@ class IMediumWriter {
  public:
   virtual ~IMediumWriter() = default;
 
-  virtual Expected<void> append_chunk(const ChunkHeader& hdr,
-                                      std::span<const std::byte> payload) noexcept = 0;
-  virtual Expected<void> finalize_segment() noexcept = 0;
-  virtual Expected<void> sync() noexcept = 0;
-  virtual Expected<void> close() noexcept = 0;
+  virtual void append_chunk(const ChunkHeader& hdr,
+                            std::span<const std::byte> payload) = 0;
+  virtual void finalize_segment() = 0;
+  virtual void sync() = 0;
+  virtual void close() = 0;
 };
 
 class IMediumReader {
  public:
   virtual ~IMediumReader() = default;
 
-  virtual Expected<OwnedChunk> read_chunk_by_index(uint32_t segment_id,
-                                                    uint32_t chunk_id) noexcept = 0;
-  virtual Expected<void> close() noexcept = 0;
+  virtual OwnedChunk read_chunk_by_index(uint32_t segment_id,
+                                         uint32_t chunk_id) = 0;
+  virtual void close() = 0;
 };
 
 class IMedium {
@@ -58,14 +57,12 @@ class IMedium {
   virtual MediumKind kind() const noexcept = 0;
   virtual MediumCaps capabilities() const noexcept = 0;
 
-  virtual Expected<std::unique_ptr<IMediumWriter>> open_writer(
-      const WriteOpenParams&) noexcept = 0;
-  virtual Expected<std::unique_ptr<IMediumReader>> open_reader(
-      const ReadOpenParams&) noexcept = 0;
+  virtual std::unique_ptr<IMediumWriter> open_writer(const WriteOpenParams&) = 0;
+  virtual std::unique_ptr<IMediumReader> open_reader(const ReadOpenParams&) = 0;
 };
 
-Expected<std::unique_ptr<IMedium>> make_disk_medium(const RunConfig&) noexcept;
-Expected<std::unique_ptr<IMedium>> make_tcp_sender_medium(const RunConfig&) noexcept;
-Expected<std::unique_ptr<IMedium>> make_tcp_receiver_medium(const RunConfig&) noexcept;
+std::unique_ptr<IMedium> make_disk_medium(const RunConfig&);
+std::unique_ptr<IMedium> make_tcp_sender_medium(const RunConfig&);
+std::unique_ptr<IMedium> make_tcp_receiver_medium(const RunConfig&);
 
 }  // namespace bwm

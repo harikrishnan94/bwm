@@ -1,4 +1,5 @@
 #include <chrono>
+#include <format>
 #include <iostream>
 
 #include "bwm/core/error.hpp"
@@ -12,9 +13,15 @@ bool test_invalid_factory_args() {
   bad_workers.queue_depth = 16;
   bad_workers.chunk_size = 4096;
 
-  auto s1 = bwm::make_scheduler(bad_workers);
-  if (s1 || s1.error().code != bwm::ErrorCode::InvalidArgument) {
-    std::cerr << "expected invalid argument for worker_threads=0\n";
+  bool bad_workers_rejected = false;
+  try {
+    static_cast<void>(bwm::make_scheduler(bad_workers));
+  } catch (const bwm::Error &e) {
+    bad_workers_rejected = (e.code() == bwm::ErrorCode::InvalidArgument);
+  }
+  if (!bad_workers_rejected) {
+    std::cerr <<
+        std::format("expected invalid argument for worker_threads=0\n");
     return false;
   }
 
@@ -23,9 +30,14 @@ bool test_invalid_factory_args() {
   bad_queue.queue_depth = 0;
   bad_queue.chunk_size = 4096;
 
-  auto s2 = bwm::make_scheduler(bad_queue);
-  if (s2 || s2.error().code != bwm::ErrorCode::InvalidArgument) {
-    std::cerr << "expected invalid argument for queue_depth=0\n";
+  bool bad_queue_rejected = false;
+  try {
+    static_cast<void>(bwm::make_scheduler(bad_queue));
+  } catch (const bwm::Error &e) {
+    bad_queue_rejected = (e.code() == bwm::ErrorCode::InvalidArgument);
+  }
+  if (!bad_queue_rejected) {
+    std::cerr << std::format("expected invalid argument for queue_depth=0\n");
     return false;
   }
 
@@ -40,58 +52,73 @@ bool test_scheduler_lifecycle() {
 
   auto sched = bwm::make_scheduler(cfg);
   if (!sched) {
-    std::cerr << "make_scheduler failed: " << sched.error().message << "\n";
+    std::cerr << std::format("make_scheduler failed\n");
     return false;
   }
 
-  auto submit_before_start = (*sched)->submit(bwm::Job{.seq = 1, .segment_id = 0, .chunk_id = 0});
-  if (submit_before_start || submit_before_start.error().code != bwm::ErrorCode::InvalidArgument) {
-    std::cerr << "submit before start should fail\n";
+  bool submit_before_start_failed = false;
+  try {
+    sched->submit(bwm::Job{.seq = 1, .segment_id = 0, .chunk_id = 0});
+  } catch (const bwm::Error &e) {
+    submit_before_start_failed = (e.code() == bwm::ErrorCode::InvalidArgument);
+  }
+  if (!submit_before_start_failed) {
+    std::cerr << std::format("submit before start should fail\n");
     return false;
   }
 
-  auto start = (*sched)->start();
-  if (!start) {
-    std::cerr << "start failed: " << start.error().message << "\n";
+  try {
+    sched->start();
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("start failed: {}\n", e.what());
     return false;
   }
 
   for (uint32_t i = 0; i < 64; ++i) {
-    auto s = (*sched)->submit(bwm::Job{.seq = i, .segment_id = 1, .chunk_id = i});
-    if (!s) {
-      std::cerr << "submit failed at i=" << i << ": " << s.error().message << "\n";
+    try {
+      sched->submit(bwm::Job{.seq = i, .segment_id = 1, .chunk_id = i});
+    } catch (const bwm::Error &e) {
+      std::cerr << std::format("submit failed at i={}: {}\n", i, e.what());
       return false;
     }
   }
 
-  auto stop = (*sched)->stop_issue_new_work();
-  if (!stop) {
-    std::cerr << "stop_issue_new_work failed: " << stop.error().message << "\n";
+  try {
+    sched->stop_issue_new_work();
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("stop_issue_new_work failed: {}\n", e.what());
     return false;
   }
 
-  auto submit_after_stop = (*sched)->submit(bwm::Job{.seq = 65, .segment_id = 0, .chunk_id = 0});
-  if (submit_after_stop || submit_after_stop.error().code != bwm::ErrorCode::Unsupported) {
-    std::cerr << "submit after stop should be unsupported\n";
+  bool submit_after_stop_failed = false;
+  try {
+    sched->submit(bwm::Job{.seq = 65, .segment_id = 0, .chunk_id = 0});
+  } catch (const bwm::Error &e) {
+    submit_after_stop_failed = (e.code() == bwm::ErrorCode::Unsupported);
+  }
+  if (!submit_after_stop_failed) {
+    std::cerr << std::format("submit after stop should be unsupported\n");
     return false;
   }
 
-  auto drain = (*sched)->drain();
-  if (!drain) {
-    std::cerr << "drain failed: " << drain.error().message << "\n";
+  try {
+    sched->drain();
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("drain failed: {}\n", e.what());
     return false;
   }
 
-  auto join = (*sched)->join();
-  if (!join) {
-    std::cerr << "join failed: " << join.error().message << "\n";
+  try {
+    sched->join();
+  } catch (const bwm::Error &e) {
+    std::cerr << std::format("join failed: {}\n", e.what());
     return false;
   }
 
   return true;
 }
 
-}  // namespace
+} // namespace
 
 int main() {
   if (!test_invalid_factory_args()) {
