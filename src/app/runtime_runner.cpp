@@ -13,6 +13,7 @@
 #include <iomanip>
 #include <iostream>
 #include <map>
+#include <memory>
 #include <mutex>
 #include <optional>
 #include <ranges>
@@ -255,6 +256,24 @@ Result<void> write_all_fd(int fd, const uint8_t* data, size_t size) {
   return {};
 }
 
+Result<void> pwrite_all_fd(int fd, const uint8_t* data, size_t size, off_t offset) {
+  size_t done = 0;
+  while (done < size) {
+    const ssize_t n = ::pwrite(fd, data + done, size - done, offset + static_cast<off_t>(done));
+    if (n < 0) {
+      if (errno == EINTR) {
+        continue;
+      }
+      return std::unexpected(AppError{"pwrite failed: " + std::string(std::strerror(errno))});
+    }
+    if (n == 0) {
+      return std::unexpected(AppError{"pwrite failed: no forward progress"});
+    }
+    done += static_cast<size_t>(n);
+  }
+  return {};
+}
+
 Result<void> pread_all_fd(int fd, uint8_t* data, size_t size, off_t offset) {
   size_t done = 0;
   while (done < size) {
@@ -436,6 +455,150 @@ Result<void> validate_io_mode(const Config& cfg, bool compressed) {
   return {};
 }
 
+struct SegmentReservation {
+  int fd{-1};
+  size_t file_id{0};
+  uint64_t offset{0};
+};
+
+class SegmentedFileWriter {
+ public:
+  SegmentedFileWriter(std::filesystem::path dir,
+                      size_t segment_size_bytes,
+                      bool compressed,
+                      bool direct_io)
+      : dir_(std::move(dir)),
+        segment_size_bytes_(segment_size_bytes),
+        compressed_(compressed),
+        direct_io_(direct_io) {}
+
+  Result<void> open_first() { return rotate_segment(); }
+
+  Result<SegmentReservation> reserve(size_t bytes) {
+    for (;;) {
+      SegmentState* seg = current_.load(std::memory_order_acquire);
+      if (seg == nullptr) {
+        return std::unexpected(AppError{"segment writer not initialized"});
+      }
+
+      uint64_t start = seg->next_offset.load(std::memory_order_relaxed);
+      while (true) {
+        if (!fits_in_segment(start, bytes)) {
+          break;
+        }
+        const uint64_t next = start + static_cast<uint64_t>(bytes);
+        if (seg->next_offset.compare_exchange_weak(start,
+                                                   next,
+                                                   std::memory_order_acq_rel,
+                                                   std::memory_order_relaxed)) {
+          return SegmentReservation{seg->fd, seg->file_id, start};
+        }
+      }
+
+      std::scoped_lock lock(rotate_mu_);
+      SegmentState* cur = current_.load(std::memory_order_acquire);
+      if (cur != seg) {
+        continue;
+      }
+      const uint64_t cur_start = cur->next_offset.load(std::memory_order_relaxed);
+      if (fits_in_segment(cur_start, bytes)) {
+        continue;
+      }
+      auto rot = rotate_segment_locked();
+      if (!rot) {
+        return std::unexpected(rot.error());
+      }
+    }
+  }
+
+  const std::vector<std::filesystem::path>& files() const { return files_; }
+
+  Result<void> finalize() {
+    std::scoped_lock lock(rotate_mu_);
+    for (auto& seg : segments_) {
+      if (seg->fd >= 0) {
+        auto s = maybe_fsync(seg->fd);
+        if (!s) {
+          return std::unexpected(s.error());
+        }
+        ::close(seg->fd);
+        seg->fd = -1;
+      }
+    }
+    return {};
+  }
+
+  ~SegmentedFileWriter() {
+    for (auto& seg : segments_) {
+      if (seg->fd >= 0) {
+        ::close(seg->fd);
+        seg->fd = -1;
+      }
+    }
+  }
+
+ private:
+  struct SegmentState {
+    int fd{-1};
+    size_t file_id{0};
+    std::atomic<uint64_t> next_offset{0};
+  };
+
+  bool fits_in_segment(uint64_t start, size_t bytes) const {
+    if (bytes > std::numeric_limits<uint64_t>::max() - start) {
+      return false;
+    }
+    const uint64_t end = start + static_cast<uint64_t>(bytes);
+    if (end <= static_cast<uint64_t>(segment_size_bytes_)) {
+      return true;
+    }
+    return start == sizeof(SegmentHeader);
+  }
+
+  Result<void> rotate_segment() {
+    std::scoped_lock lock(rotate_mu_);
+    return rotate_segment_locked();
+  }
+
+  Result<void> rotate_segment_locked() {
+    const auto path = dir_ / ("segment_" + std::to_string(segments_.size()) + ".dat");
+    auto fdv = open_file_write(path, direct_io_);
+    if (!fdv) {
+      return std::unexpected(fdv.error());
+    }
+    const int fd = *fdv;
+
+    SegmentHeader sh{};
+    sh.flags = compressed_ ? 1u : 0u;
+    auto wr = write_all_fd(fd, reinterpret_cast<const uint8_t*>(&sh), sizeof(sh));
+    if (!wr) {
+      ::close(fd);
+      return std::unexpected(wr.error());
+    }
+
+    auto state = std::make_unique<SegmentState>();
+    state->fd = fd;
+    state->file_id = segments_.size();
+    state->next_offset.store(sizeof(SegmentHeader), std::memory_order_relaxed);
+    SegmentState* ptr = state.get();
+
+    segments_.push_back(std::move(state));
+    files_.push_back(path);
+    current_.store(ptr, std::memory_order_release);
+    return {};
+  }
+
+  std::filesystem::path dir_;
+  size_t segment_size_bytes_{0};
+  bool compressed_{false};
+  bool direct_io_{false};
+
+  std::mutex rotate_mu_;
+  std::vector<std::unique_ptr<SegmentState>> segments_;
+  std::vector<std::filesystem::path> files_;
+  std::atomic<SegmentState*> current_{nullptr};
+};
+
 Result<Dataset> create_disk_dataset(const Config& cfg,
                                     Codec& codec,
                                     bool compressed,
@@ -458,127 +621,149 @@ Result<Dataset> create_disk_dataset(const Config& cfg,
     return std::unexpected(mk.error());
   }
 
-  LowEntropyGenerator gen(cfg.seed);
-  auto cal = calibrate_generator(gen, codec, cfg, compressed);
+  LowEntropyGenerator generator(cfg.seed);
+  auto cal = calibrate_generator(generator, codec, cfg, compressed);
   if (!cal) {
     return std::unexpected(cal.error());
   }
 
-  size_t seg_id = 0;
-  size_t current_seg_size = 0;
-  int fd = -1;
+  SegmentedFileWriter writer(ds.dir, cfg.segment_size_bytes, compressed, cfg.direct_io);
+  auto open = writer.open_first();
+  if (!open) {
+    return std::unexpected(open.error());
+  }
 
-  auto open_next_segment = [&]() -> Result<void> {
-    if (fd >= 0) {
-      auto s = maybe_fsync(fd);
-      if (!s) {
-        return std::unexpected(s.error());
-      }
-      ::close(fd);
-      fd = -1;
+  ds.chunks.resize(chunk_count);
+
+  std::atomic<size_t> next_index{0};
+  std::atomic<uint64_t> total_uncompressed{0};
+  std::atomic<uint64_t> total_stored{0};
+  std::atomic<bool> failed{false};
+  std::optional<AppError> error;
+  std::mutex err_mu;
+
+  auto set_error = [&](AppError e) {
+    std::scoped_lock lock(err_mu);
+    if (!error.has_value()) {
+      error = std::move(e);
+      failed.store(true, std::memory_order_release);
     }
-    const auto path = ds.dir / ("segment_" + std::to_string(seg_id++) + ".dat");
-    auto fdv = open_file_write(path, cfg.direct_io);
-    if (!fdv) {
-      return std::unexpected(fdv.error());
-    }
-    fd = *fdv;
-    ds.files.push_back(path);
-    current_seg_size = 0;
-    SegmentHeader sh{};
-    sh.flags = compressed ? 1u : 0u;
-    auto wr = write_all_fd(fd, reinterpret_cast<const uint8_t*>(&sh), sizeof(sh));
-    if (!wr) {
-      return std::unexpected(wr.error());
-    }
-    current_seg_size += sizeof(sh);
-    return {};
   };
 
-  auto seg_open = open_next_segment();
-  if (!seg_open) {
-    return std::unexpected(seg_open.error());
+  std::vector<std::thread> workers;
+  workers.reserve(cfg.threads);
+  for (uint32_t w = 0; w < cfg.threads; ++w) {
+    workers.emplace_back([&]() {
+      LowEntropyGenerator worker_generator = generator;
+      std::vector<uint8_t> raw;
+      std::vector<uint8_t> comp;
+      if (compressed) {
+        comp.resize(codec.max_compressed_size(cfg.chunk_size));
+      }
+
+      while (!failed.load(std::memory_order_acquire)) {
+        const size_t i = next_index.fetch_add(1, std::memory_order_relaxed);
+        if (i >= chunk_count) {
+          break;
+        }
+
+        worker_generator.generate(i, raw, cfg.chunk_size);
+        const uint32_t chk = XXH32(raw.data(), raw.size(), 0);
+
+        std::span<const uint8_t> payload;
+        uint32_t comp_sz = 0;
+        if (compressed) {
+          auto c = codec.compress(raw, comp);
+          if (!c) {
+            set_error(c.error());
+            break;
+          }
+          comp_sz = static_cast<uint32_t>(*c);
+          payload = std::span<const uint8_t>(comp.data(), *c);
+        } else {
+          comp_sz = static_cast<uint32_t>(raw.size());
+          payload = raw;
+        }
+
+        const size_t record_size = compressed ? (sizeof(ChunkFrameHeader) + payload.size()) : payload.size();
+        auto reservation = writer.reserve(record_size);
+        if (!reservation) {
+          set_error(reservation.error());
+          break;
+        }
+
+        ChunkLoc loc{};
+        loc.file_id = reservation->file_id;
+        loc.raw_size = static_cast<uint32_t>(raw.size());
+        loc.stored_size = comp_sz;
+        loc.checksum = chk;
+        loc.algo_id = static_cast<uint8_t>(compressed ? codec.id() : Algo::None);
+
+        if (compressed) {
+          ChunkFrameHeader hdr{};
+          hdr.raw_size = static_cast<uint32_t>(raw.size());
+          hdr.comp_size = comp_sz;
+          hdr.checksum = chk;
+          hdr.algo_id = static_cast<uint8_t>(codec.id());
+
+          auto wrh = pwrite_all_fd(reservation->fd,
+                                   reinterpret_cast<const uint8_t*>(&hdr),
+                                   sizeof(hdr),
+                                   static_cast<off_t>(reservation->offset));
+          if (!wrh) {
+            set_error(wrh.error());
+            break;
+          }
+
+          loc.offset = reservation->offset + sizeof(ChunkFrameHeader);
+          auto wrp = pwrite_all_fd(reservation->fd,
+                                   payload.data(),
+                                   payload.size(),
+                                   static_cast<off_t>(loc.offset));
+          if (!wrp) {
+            set_error(wrp.error());
+            break;
+          }
+
+          total_stored.fetch_add(sizeof(hdr) + payload.size(), std::memory_order_relaxed);
+        } else {
+          loc.offset = reservation->offset;
+          auto wrp = pwrite_all_fd(reservation->fd,
+                                   payload.data(),
+                                   payload.size(),
+                                   static_cast<off_t>(loc.offset));
+          if (!wrp) {
+            set_error(wrp.error());
+            break;
+          }
+
+          total_stored.fetch_add(payload.size(), std::memory_order_relaxed);
+        }
+
+        ds.chunks[i] = loc;
+        total_uncompressed.fetch_add(raw.size(), std::memory_order_relaxed);
+      }
+    });
   }
 
-  std::vector<uint8_t> raw;
-  std::vector<uint8_t> comp(codec.max_compressed_size(cfg.chunk_size));
-  for (size_t i = 0; i < chunk_count; ++i) {
-    gen.generate(i, raw, cfg.chunk_size);
-    const uint32_t chk = XXH32(raw.data(), raw.size(), 0);
-
-    std::span<const uint8_t> payload;
-    uint32_t comp_sz = 0;
-    if (compressed) {
-      auto c = codec.compress(raw, comp);
-      if (!c) {
-        close_dataset(ds);
-        return std::unexpected(c.error());
-      }
-      comp_sz = static_cast<uint32_t>(*c);
-      payload = std::span<const uint8_t>(comp.data(), *c);
-    } else {
-      comp_sz = static_cast<uint32_t>(raw.size());
-      payload = raw;
-    }
-
-    const size_t record_size = compressed ? (sizeof(ChunkFrameHeader) + payload.size()) : payload.size();
-    if (current_seg_size + record_size > cfg.segment_size_bytes) {
-      auto nxt = open_next_segment();
-      if (!nxt) {
-        close_dataset(ds);
-        return std::unexpected(nxt.error());
-      }
-    }
-
-    ChunkLoc loc{};
-    loc.file_id = ds.files.size() - 1;
-    loc.raw_size = static_cast<uint32_t>(raw.size());
-    loc.stored_size = comp_sz;
-    loc.checksum = chk;
-    loc.algo_id = static_cast<uint8_t>(compressed ? codec.id() : Algo::None);
-
-    if (compressed) {
-      ChunkFrameHeader hdr{};
-      hdr.raw_size = static_cast<uint32_t>(raw.size());
-      hdr.comp_size = comp_sz;
-      hdr.checksum = chk;
-      hdr.algo_id = static_cast<uint8_t>(codec.id());
-      loc.offset = current_seg_size + sizeof(ChunkFrameHeader);
-      auto wrh = write_all_fd(fd, reinterpret_cast<const uint8_t*>(&hdr), sizeof(hdr));
-      if (!wrh) {
-        close_dataset(ds);
-        return std::unexpected(wrh.error());
-      }
-      auto wrp = write_all_fd(fd, payload.data(), payload.size());
-      if (!wrp) {
-        close_dataset(ds);
-        return std::unexpected(wrp.error());
-      }
-      current_seg_size += sizeof(hdr) + payload.size();
-      ds.total_stored += sizeof(hdr) + payload.size();
-    } else {
-      loc.offset = current_seg_size;
-      auto wrp = write_all_fd(fd, payload.data(), payload.size());
-      if (!wrp) {
-        close_dataset(ds);
-        return std::unexpected(wrp.error());
-      }
-      current_seg_size += payload.size();
-      ds.total_stored += payload.size();
-    }
-
-    ds.chunks.push_back(loc);
-    ds.total_uncompressed += raw.size();
+  for (auto& t : workers) {
+    t.join();
   }
 
-  if (fd >= 0) {
-    auto s = maybe_fsync(fd);
-    if (!s) {
-      close_dataset(ds);
-      return std::unexpected(s.error());
-    }
-    ::close(fd);
+  auto close = writer.finalize();
+  if (!close) {
+    close_dataset(ds);
+    return std::unexpected(close.error());
   }
+
+  if (error.has_value()) {
+    close_dataset(ds);
+    return std::unexpected(*error);
+  }
+
+  ds.files = writer.files();
+  ds.total_uncompressed = total_uncompressed.load(std::memory_order_relaxed);
+  ds.total_stored = total_stored.load(std::memory_order_relaxed);
 
   for (const auto& file : ds.files) {
     auto rfd = open_file_read(file, cfg.direct_io && !compressed);
@@ -612,11 +797,15 @@ Result<PhaseResult> run_disk_write_phase(const Config& cfg,
     return std::unexpected(mk.error());
   }
 
+  SegmentedFileWriter writer(out_dir, cfg.segment_size_bytes, compressed, cfg.direct_io && !compressed);
+  auto open = writer.open_first();
+  if (!open) {
+    return std::unexpected(open.error());
+  }
+
   BoundedMPMCQueue<Job> jobs(cfg.queue_depth);
-  BoundedMPMCQueue<ProducedChunk> written(cfg.queue_depth);
 
   std::atomic<uint64_t> issued_chunks{0};
-  std::atomic<uint32_t> workers_done{0};
   std::atomic<uint64_t> total_stored_bytes{0};
 
   HashSink sink(cfg.seed);
@@ -627,6 +816,7 @@ Result<PhaseResult> run_disk_write_phase(const Config& cfg,
   }
 
   std::atomic<bool> schedule_finished{false};
+  std::atomic<bool> failed{false};
   std::optional<AppError> error;
   std::mutex err_mu;
 
@@ -634,114 +824,21 @@ Result<PhaseResult> run_disk_write_phase(const Config& cfg,
     std::scoped_lock lock(err_mu);
     if (!error.has_value()) {
       error = std::move(e);
+      failed.store(true, std::memory_order_release);
     }
   };
-
-  struct WriterState {
-    int fd{-1};
-    size_t seg_id{0};
-    size_t seg_size{0};
-  } ws;
-
-  auto open_segment = [&]() -> Result<void> {
-    if (ws.fd >= 0) {
-      auto s = maybe_fsync(ws.fd);
-      if (!s) {
-        return std::unexpected(s.error());
-      }
-      ::close(ws.fd);
-      ws.fd = -1;
-    }
-    auto path = out_dir / ("segment_" + std::to_string(ws.seg_id++) + ".dat");
-    auto fdv = open_file_write(path, cfg.direct_io && !compressed);
-    if (!fdv) {
-      return std::unexpected(fdv.error());
-    }
-    ws.fd = *fdv;
-    ws.seg_size = 0;
-    SegmentHeader sh{};
-    sh.flags = compressed ? 1u : 0u;
-    auto wr = write_all_fd(ws.fd, reinterpret_cast<const uint8_t*>(&sh), sizeof(sh));
-    if (!wr) {
-      return std::unexpected(wr.error());
-    }
-    ws.seg_size += sizeof(sh);
-    return {};
-  };
-
-  auto seg = open_segment();
-  if (!seg) {
-    return std::unexpected(seg.error());
-  }
-
-  std::thread writer([&]() {
-    std::unordered_map<uint64_t, ProducedChunk> pending;
-    pending.reserve(static_cast<size_t>(cfg.queue_depth) * 2);
-    uint64_t next = 0;
-
-    while (true) {
-      ProducedChunk item;
-      if (written.try_pop(item)) {
-        pending.emplace(item.seq, std::move(item));
-      } else {
-        if (schedule_finished.load(std::memory_order_relaxed) &&
-            workers_done.load(std::memory_order_relaxed) == cfg.threads && pending.empty() &&
-            next == issued_chunks.load(std::memory_order_relaxed)) {
-          break;
-        }
-        std::this_thread::yield();
-      }
-
-      auto it = pending.find(next);
-      while (it != pending.end()) {
-        auto& c = it->second;
-        const size_t write_size = compressed ? (sizeof(ChunkFrameHeader) + c.payload.size()) : c.payload.size();
-        if (ws.seg_size + write_size > cfg.segment_size_bytes) {
-          auto nxt = open_segment();
-          if (!nxt) {
-            set_error(nxt.error());
-            return;
-          }
-        }
-
-        if (compressed) {
-          ChunkFrameHeader h{};
-          h.raw_size = c.raw_size;
-          h.comp_size = c.comp_size;
-          h.checksum = c.checksum;
-          h.algo_id = c.algo_id;
-          auto wrh = write_all_fd(ws.fd, reinterpret_cast<const uint8_t*>(&h), sizeof(h));
-          if (!wrh) {
-            set_error(wrh.error());
-            return;
-          }
-          ws.seg_size += sizeof(h);
-          total_stored_bytes.fetch_add(sizeof(h), std::memory_order_relaxed);
-        }
-        auto wrp = write_all_fd(ws.fd, c.payload.data(), c.payload.size());
-        if (!wrp) {
-          set_error(wrp.error());
-          return;
-        }
-        ws.seg_size += c.payload.size();
-        total_stored_bytes.fetch_add(c.payload.size(), std::memory_order_relaxed);
-
-        pending.erase(it);
-        ++next;
-        it = pending.find(next);
-      }
-    }
-  });
 
   std::vector<std::thread> workers;
   workers.reserve(cfg.threads);
   for (uint32_t w = 0; w < cfg.threads; ++w) {
     workers.emplace_back([&]() {
+      LowEntropyGenerator worker_generator = generator;
       std::vector<uint8_t> raw;
       std::vector<uint8_t> comp;
       if (compressed) {
         comp.resize(codec.max_compressed_size(cfg.chunk_size));
       }
+
       for (;;) {
         Job job;
         if (!jobs.try_pop(job)) {
@@ -755,44 +852,85 @@ Result<PhaseResult> run_disk_write_phase(const Config& cfg,
         if (job.stop) {
           break;
         }
+        if (failed.load(std::memory_order_acquire)) {
+          break;
+        }
 
-        ProducedChunk pc{};
-        pc.seq = job.seq;
-        pc.algo_id = static_cast<uint8_t>(compressed ? codec.id() : Algo::None);
+        uint32_t raw_size = 0;
+        uint32_t comp_size = 0;
+        uint32_t checksum = 0;
+        uint8_t algo_id = static_cast<uint8_t>(compressed ? codec.id() : Algo::None);
+        std::span<const uint8_t> payload;
 
         if (compressed) {
-          generator.generate(job.seq, raw, cfg.chunk_size);
+          worker_generator.generate(job.seq, raw, cfg.chunk_size);
           sink.consume(raw);
 
-          pc.raw_size = static_cast<uint32_t>(raw.size());
-          pc.checksum = XXH32(raw.data(), raw.size(), 0);
+          raw_size = static_cast<uint32_t>(raw.size());
+          checksum = XXH32(raw.data(), raw.size(), 0);
           auto c = codec.compress(raw, comp);
           if (!c) {
             set_error(c.error());
             break;
           }
-          pc.comp_size = static_cast<uint32_t>(*c);
-          pc.payload.assign(comp.begin(), comp.begin() + static_cast<std::ptrdiff_t>(*c));
+          comp_size = static_cast<uint32_t>(*c);
+          payload = std::span<const uint8_t>(comp.data(), *c);
         } else {
-          generator.generate(job.seq, pc.payload, cfg.chunk_size);
-          sink.consume(pc.payload);
+          worker_generator.generate(job.seq, raw, cfg.chunk_size);
+          sink.consume(raw);
 
-          pc.raw_size = static_cast<uint32_t>(pc.payload.size());
-          pc.checksum = XXH32(pc.payload.data(), pc.payload.size(), 0);
-          pc.comp_size = pc.raw_size;
+          raw_size = static_cast<uint32_t>(raw.size());
+          checksum = XXH32(raw.data(), raw.size(), 0);
+          comp_size = raw_size;
+          payload = raw;
         }
 
-        while (!written.try_push(std::move(pc))) {
-          if (error.has_value()) {
-            break;
-          }
-          std::this_thread::yield();
-        }
-        if (error.has_value()) {
+        const size_t record_size = compressed ? (sizeof(ChunkFrameHeader) + payload.size()) : payload.size();
+        auto reservation = writer.reserve(record_size);
+        if (!reservation) {
+          set_error(reservation.error());
           break;
         }
+
+        if (compressed) {
+          ChunkFrameHeader h{};
+          h.raw_size = raw_size;
+          h.comp_size = comp_size;
+          h.checksum = checksum;
+          h.algo_id = algo_id;
+
+          auto wrh = pwrite_all_fd(reservation->fd,
+                                   reinterpret_cast<const uint8_t*>(&h),
+                                   sizeof(h),
+                                   static_cast<off_t>(reservation->offset));
+          if (!wrh) {
+            set_error(wrh.error());
+            break;
+          }
+
+          auto wrp = pwrite_all_fd(reservation->fd,
+                                   payload.data(),
+                                   payload.size(),
+                                   static_cast<off_t>(reservation->offset + sizeof(ChunkFrameHeader)));
+          if (!wrp) {
+            set_error(wrp.error());
+            break;
+          }
+
+          total_stored_bytes.fetch_add(sizeof(h) + payload.size(), std::memory_order_relaxed);
+        } else {
+          auto wrp = pwrite_all_fd(reservation->fd,
+                                   payload.data(),
+                                   payload.size(),
+                                   static_cast<off_t>(reservation->offset));
+          if (!wrp) {
+            set_error(wrp.error());
+            break;
+          }
+
+          total_stored_bytes.fetch_add(payload.size(), std::memory_order_relaxed);
+        }
       }
-      workers_done.fetch_add(1, std::memory_order_relaxed);
     });
   }
 
@@ -804,12 +942,12 @@ Result<PhaseResult> run_disk_write_phase(const Config& cfg,
       Job j{};
       j.seq = seq++;
       while (!jobs.try_push(std::move(j))) {
-        if (error.has_value()) {
+        if (failed.load(std::memory_order_acquire)) {
           break;
         }
         std::this_thread::yield();
       }
-      if (error.has_value()) {
+      if (failed.load(std::memory_order_acquire)) {
         break;
       }
     }
@@ -828,16 +966,12 @@ Result<PhaseResult> run_disk_write_phase(const Config& cfg,
   for (auto& t : workers) {
     t.join();
   }
-  writer.join();
 
   const auto stop = Clock::now();
 
-  if (ws.fd >= 0) {
-    auto s = maybe_fsync(ws.fd);
-    if (!s) {
-      return std::unexpected(s.error());
-    }
-    ::close(ws.fd);
+  auto close = writer.finalize();
+  if (!close) {
+    return std::unexpected(close.error());
   }
 
   if (error.has_value()) {
